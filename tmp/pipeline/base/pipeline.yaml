@@ -1,0 +1,144 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: clone
+  labels:
+    build-name: changeme
+spec:
+  description: |
+    Git clone of the upstream repo followed by a Git push to the apps repo.
+  params:
+  - name: REQUESTOR_ID
+    type: string
+    description: Requestor who triggered a workflow from the backstage end.
+  - name: APPLICATION_NAME
+    type: string
+    description: The name of the application as requested by the requestor.
+  - name: GIT_SCRIPT
+    type: string
+    description: The script that git-cli needs to execute.
+  - name: GIT_USER_NAME
+    type: string
+    description: Git username performing the git commands.
+  - name: GIT_USER_EMAIL
+    type: string
+    description: Email corresponding to the username performing the commands.
+  - name: repo-url
+    type: string
+    description: The git repository URL to clone from.
+  - name: GIT_TARGET_REPO
+    type: string
+    description: Gitops application repository to push to.
+  - name: branch-name
+    type: string
+    description: The git branch to clone.
+  - name: rox_central_endpoint
+    type: string
+    description: The git branch to clone.
+  - name: rox_api_token
+    type: string
+    description: The git branch to clone.
+  - name: deployment_file
+    type: string
+    description: The git branch to clone.   
+  workspaces:
+  - name: shared-data
+    description: |
+      This workspace will receive the cloned git repo and be passed
+      to the next Task for the repo's yaml's file to GitOps.
+  - name: ssh-credentials
+    description: |
+      Key based authentication to pull/push from the repo.
+  tasks:
+  - name: fetch-repo
+    taskRef:
+      name: git-clone
+    workspaces:
+    - name: output
+      workspace: shared-data
+    - name: ssh-directory
+      workspace: ssh-credentials 
+    params:
+    - name: url
+      value: $(params.repo-url)
+    - name: revision
+      value: $(params.branch-name)
+  - name: deployment-check
+    runAfter: ["fetch-repo"]
+    taskRef:
+      name: rox-deployment-check
+    workspaces:
+    - name: workspace
+      workspace: shared-data 
+    params:
+    - name: rox_central_endpoint
+      value: $(params.rox_central_endpoint)
+    - name: rox_api_token
+      value: $(params.rox_api_token)
+    - name: file
+      value: $(params.deployment_file)
+  - name: image-check
+    runAfter: ["fetch-repo"]
+    taskRef:
+      name: rox-image-check
+    workspaces:
+    - name: workspace
+      workspace: shared-data 
+    params:
+    - name: rox_central_endpoint
+      value: $(params.rox_central_endpoint)
+    - name: rox_api_token
+      value: $(params.rox_api_token)
+    - name: file
+      value: $(params.deployment_file)
+  - name: image-scan
+    runAfter: ["fetch-repo"]
+    taskRef:
+      name: rox-image-scan
+    workspaces:
+    - name: workspace
+      workspace: shared-data 
+    params:
+    - name: rox_central_endpoint
+      value: $(params.rox_central_endpoint)
+    - name: rox_api_token
+      value: $(params.rox_api_token)
+    - name: file
+      value: $(params.deployment_file)
+  - name: gitops
+    runAfter: ["image-scan", "image-check", "deployment-check"]
+    taskRef:
+      name: git-cli
+    workspaces:
+    - name: source
+      workspace: shared-data
+    - name: ssh-directory
+      workspace: ssh-credentials 
+    params:
+    - name: GIT_SCRIPT
+      value: $(params.GIT_SCRIPT)
+    - name: GIT_USER_NAME
+      value: $(params.GIT_USER_NAME)  
+    - name: GIT_USER_EMAIL
+      value: $(params.GIT_USER_EMAIL)
+    - name: GIT_TARGET_REPO
+      value: $(params.GIT_TARGET_REPO)
+    - name: APPLICATION_NAME
+      value: $(params.APPLICATION_NAME)
+    - name: REQUESTOR_ID
+      value: $(params.REQUESTOR_ID)
+    - name: SHA
+      value: $(tasks.fetch-repo.results.commit)
+  # - name: cat-readme
+  #   runAfter: ["fetch-repo"]  # Wait until the clone is done before reading the readme.
+  #   workspaces:
+  #   - name: source
+  #     workspace: shared-data
+  #   taskSpec:
+  #     workspaces:
+  #     - name: source
+  #     steps:
+  #     - image: zshusers/zsh:4.3.15
+  #       script: |
+  #         #!/usr/bin/env zsh
+  #         cat $(workspaces.source.path)/README.md

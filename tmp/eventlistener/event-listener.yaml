@@ -1,0 +1,14 @@
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: EventListener
+metadata:
+  name: backstage-cr
+  namespace: tekton
+spec:
+  serviceAccountName: pipeline
+  triggers:
+    - bindings:
+        - kind: TriggerBinding
+          ref: backstage-cr-binding
+      name: backstage-cr-trigger
+      template:
+        ref: backstage-cr-tt

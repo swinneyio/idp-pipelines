@@ -1,0 +1,60 @@
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerTemplate
+metadata:
+  name: backstage-cr-tt
+  namespace: tekton
+spec:
+  params:
+    - name: applicationName
+    - name: targetEnv
+    - name: git-url
+    - name: developerName
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1beta1
+      kind: PipelineRun
+      metadata:
+        generateName: backstage-pipeline-run-
+        annotations:
+          argocd.argoproj.io/compare-options: IgnoreExtraneous
+      spec:
+        params:
+          - name: GIT_USER_EMAIL
+            value: "backstage-bot@ibm.com"
+          - name: GIT_USER_NAME
+            value: "backstage-bot"
+          - name: GIT_SCRIPT
+            value: |
+              echo "Not used"
+          - name: branch-name
+            value: "main"
+          - name: APPLICATION_NAME
+            value: $(tt.params.applicationName)
+          - name: GIT_TARGET_REPO
+            value: "git@github.com:ce-apac-project-idp/otp-gitops-apps.git"
+          # - name: targetEnv
+          #   value: $(tt.params.targetEnv)
+          - name: repo-url
+            value: $(tt.params.git-url)
+          - name: REQUESTOR_ID
+            value: $(tt.params.developerName)
+          - name: rox_central_endpoint
+            value: https://central-rhacs-operator.itzroks-671000wmfn-8vdu9o-6ccd7f378ae819553d37d5f2ee142bd6-0000.au-syd.containers.appdomain.cloud
+          - name: rox_api_token
+            value: eyJhbGciOiJSUzI1NiIsImtpZCI6Imp3dGswIiwidHlwIjoiSldUIn0.eyJhdWQiOlsiaHR0cHM6Ly9zdGFja3JveC5pby9qd3Qtc291cmNlcyNhcGktdG9rZW5zIl0sImV4cCI6MTcwNDI5MDczNCwiaWF0IjoxNjcyNzU0NzM0LCJpc3MiOiJodHRwczovL3N0YWNrcm94LmlvL2p3dCIsImp0aSI6IjhjNzkwNWUxLTcyNDUtNGE0NS04OTUyLWM0NDFkNGVmZTY2NyIsIm5hbWUiOiJERVZfVE9LRU4iLCJyb2xlcyI6WyJBZG1pbiJdfQ.IHktrDUcda3zbByd9mkDCaYqBNDNEpVzwykRcPIcBu3On4Q8SqI5vmeyOYuaLH4CgdLPgt3i3Cq29UvWpUKxANCZfG3UeZeYFAe9KXg-mi1QqpZaguuCcuS936h2yG0UMMplf3TgIHaEXml5Iwfnx-gIp0MFIWm1ipBB-yvDKC_UneBaXcJjapqqh2k-6kBzo3CjFjyuVJJ_-2IH1RxkLRYRWNK41jb6-oj550lYV4bEwEBI5q7UgW5VgQhFhLVcqE_4QQ6BMDFv0zpp6cO0ThZOPKtWtSPb5cZebZFL3x-Q9e_adUOFo0BSFZs5yDK3VFjtDuVPQ5OxrYL10xr0e-AAr8qjZJk4xP9A7XQWjN38sqN3sZluh8CzLX-j67mP0OeuGubNlk-vy5REg71wULqflrpXDO575eLK8ub_08xRJQwkBmCEBjIYi9etEyBSaPeTg2j0gZbJlvowTK7cIIaYPrwdgHudTQUynzftBm916WLfRgjUNMKp-hHtAJrZgXlxLkhGH_ubvpjEnPE51kxHXLLvyh5PztMmkhpq0Z1sdcvYfsdkSEzZvPUENifY_OJVeObJ7Gq0pow6PtH-JoaoBGvPjB2lxq5OQ4OatP4cYCzGLtLvYRS_-ME72cr4BQaw7XMpSiFGfKMTPNKGgGtiLtyUxuzbwdqKuZmq6og
+          - name: deployment_file
+            value: k8-deploy.yaml
+        pipelineRef:
+          name: clone
+        workspaces:
+          - name: ssh-credentials
+            secret:
+              secretName: git-credentials
+          - name: shared-data
+            volumeClaimTemplate:
+              spec:
+                accessModes:
+                  - ReadWriteOnce
+                resources:
+                  requests:
+                    storage: 500Mi
+                storageClassName: ocs-storagecluster-cephfs

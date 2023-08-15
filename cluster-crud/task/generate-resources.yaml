@@ -1,0 +1,361 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: generate-resources
+  namespace: openshift-pipelines
+spec:
+  workspaces:
+    - description: Output workspace.
+      name: output
+  params:
+    - name: configMapName
+      type: string
+      description: Name of the AWS Cluster related configmap to help populate the YAML's in question
+      default: rhacm-aws-install-config-configmap
+    - name: resourcesNamespace
+      type: string
+      description: Namespace housing configmap above.
+    - name: clusterName
+      type: string
+      description: Input via Backstage. This is the name of the cluster. Must be globally unique.
+    - name: region
+      type: string
+      description: Region the cluster is deployed to.
+    - name: cloud
+      type: string
+      description: Chosen hyperscaler.
+    - name: version
+      type: string
+      description: OpenShift version
+  steps:
+    - name: namespace-generation
+      image: quay.io/marwan_attar_ibm/rhacm-install-namespace-generator
+      env:
+      - name: CLUSTER_NAME
+        value: "$(params.clusterName)"
+      - name: WORKSPACE
+        value: "$(workspaces.output.path)"
+      script:  |
+
+        ## TODO: We are depending on global uniqueness given through the cluster name parameter. Enforce check here.
+        # Essentially, there should not be any other namespaces created in the Hub cluster with the same name.
+        cd /tmp
+
+        # Parameters passed to the Tekton Job via user input in Backstage 
+        yq e -i '.metadata.name = env(CLUSTER_NAME)' /tmp/namespace.yaml
+        # Note the quotations. We don't want the nesting in this particular case.
+        yq e -i '.metadata.annotations."openshift.io/display-name" = env(CLUSTER_NAME)' /tmp/namespace.yaml
+        yq e -i '.metadata.annotations."cluster.open-cluster-management.io/managedCluster" = env(CLUSTER_NAME)' /tmp/namespace.yaml
+        yq e -i '.metadata.annotations."kubernetes.io/metadata.name" = env(CLUSTER_NAME)' /tmp/namespace.yaml
+
+        # Annotations - Figure out a way to avoid the hardcoding of sync waves later on
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "450"' /tmp/namespace.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "450"' /tmp/namespace.yaml
+
+        cp /tmp/namespace.yaml $WORKSPACE
+    - name: secret-generator
+      image: quay.io/marwan_attar_ibm/rhacm-install-secret-generator 
+      env:
+      - name: CLUSTER_NAME
+        value: "$(params.clusterName)"
+      - name: AWS_ACCESS_KEY_NAME
+        value: awsAccessKey
+      - name: AWS_ACCESS_KEY_REF
+        value: ade6c30f-97a9-87c8-31ea-fdd7e14598fd
+      - name: AWS_SECRET_KEY_NAME
+        value: awsSecretKey
+      - name: AWS_SECRET_KEY_REF
+        value: 36d87095-a40d-aa4a-e110-7de764cb018b
+      - name: SECRET_STORE_REF
+        value: cluster
+      - name: OPENSHIFT_PULL_SECRET_KEY_NAME
+        value: openshiftPullSecret
+      - name: OPENSHIFT_PULL_SECRET_KEY_REF
+        value: d11eb84d-7a78-4dfd-0411-a32c3cae84c9
+      - name: SSH_SECRET_KEY_NAME
+        value: openshiftSSHPrivateKey
+      - name: SSH_SECRET_KEY_REF
+        value: edcc6329-e70b-0dfe-cc90-4996f3de877d
+      - name: WORKSPACE
+        value: "$(workspaces.output.path)"
+      - name: PLATFORM_SECRET_SUFFIX # If you decide to change the value associated with this field here, ensure the corresponding changes are done in the "generate-cluster-deployment" step. 
+        value: aws-creds
+      - name: SSH_SECRET_SUFFIX # If you decide to change the value associated with this field here, ensure the corresponding changes are done in the "generate-cluster-deployment" step.
+        value: ssh-private-key
+      - name: PULL_SECRET_SUFFIX # If you decide to change the value associated with this field here, ensure the corresponding changes are done in the "generate-cluster-deployment" step.
+        value: pull-secret
+      script: | 
+        #!/usr/bin/env bash
+
+        cd /tmp
+        # AWS Creds
+        awsCredsSecretName="$CLUSTER_NAME-$PLATFORM_SECRET_SUFFIX" yq e -i '.metadata.name = env(awsCredsSecretName)' /tmp/secret-aws-creds.yaml
+        yq e -i '.metadata.namespace = env(CLUSTER_NAME)' /tmp/secret-aws-creds.yaml
+        yq e -i '.spec.data[0].secretKey = env(AWS_ACCESS_KEY_NAME)' /tmp/secret-aws-creds.yaml
+        yq e -i '.spec.data[0].remoteRef.key = env(AWS_ACCESS_KEY_REF)' /tmp/secret-aws-creds.yaml
+        yq e -i '.spec.data[1].secretKey = env(AWS_SECRET_KEY_NAME)' /tmp/secret-aws-creds.yaml
+        yq e -i '.spec.data[1].remoteRef.key = env(AWS_SECRET_KEY_REF)' /tmp/secret-aws-creds.yaml
+        yq e -i '.spec.secretStoreRef.name = env(SECRET_STORE_REF)' /tmp/secret-aws-creds.yaml
+        targetSecretName="$CLUSTER_NAME-$PLATFORM_SECRET_SUFFIX" yq e -i '.spec.target.name = env(targetSecretName)' /tmp/secret-aws-creds.yaml
+
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "455"' /tmp/secret-aws-creds.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "455"' /tmp/secret-aws-creds.yaml
+
+        # RedHat Pull Secret
+        pullSecretName="$CLUSTER_NAME-$PULL_SECRET_SUFFIX" yq e -i '.metadata.name = env(pullSecretName)' /tmp/secret-pull-secret.yaml
+        yq e -i '.metadata.namespace = env(CLUSTER_NAME)' /tmp/secret-pull-secret.yaml
+        yq e -i '.spec.data[0].secretKey = env(OPENSHIFT_PULL_SECRET_KEY_NAME)' /tmp/secret-pull-secret.yaml
+        yq e -i '.spec.data[0].remoteRef.key = env(OPENSHIFT_PULL_SECRET_KEY_REF)' /tmp/secret-pull-secret.yaml
+        yq e -i '.spec.secretStoreRef.name = env(SECRET_STORE_REF)' /tmp/secret-pull-secret.yaml
+        targetSecretName="$CLUSTER_NAME-$PULL_SECRET_SUFFIX" yq e -i '.spec.target.name = env(targetSecretName)' /tmp/secret-pull-secret.yaml
+
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "455"' /tmp/secret-pull-secret.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "455"' /tmp/secret-pull-secret.yaml
+
+        # SSH Private Key
+        sshSecretName="$CLUSTER_NAME-$SSH_SECRET_SUFFIX" yq e -i '.metadata.name = env(sshSecretName)' /tmp/secret-ssh-private-key.yaml
+        yq e -i '.metadata.namespace = env(CLUSTER_NAME)' /tmp/secret-ssh-private-key.yaml
+        yq e -i '.spec.data[0].secretKey = env(SSH_SECRET_KEY_NAME)' /tmp/secret-ssh-private-key.yaml
+        yq e -i '.spec.data[0].remoteRef.key = env(SSH_SECRET_KEY_REF)' /tmp/secret-ssh-private-key.yaml
+        yq e -i '.spec.secretStoreRef.name = env(SECRET_STORE_REF)' /tmp/secret-ssh-private-key.yaml
+        targetSecretName="$CLUSTER_NAME-$SSH_SECRET_SUFFIX" yq e -i '.spec.target.name = env(targetSecretName)' /tmp/secret-ssh-private-key.yaml
+
+
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "455"' /tmp/secret-ssh-private-key.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "455"' /tmp/secret-ssh-private-key.yaml
+
+        cp secret-ssh-private-key.yaml secret-pull-secret.yaml secret-aws-creds.yaml $WORKSPACE
+    - name: generate-install-config
+      image: quay.io/marwan_attar_ibm/rhacm-install-install-config-generator
+      env:
+      - name: CONFIGMAP
+        value: "$(params.configMapName)"
+      - name: RESOURCE_NAMESPACE
+        value: "$(params.resourcesNamespace)"
+      - name: CLUSTER_NAME
+        value: "$(params.clusterName)"
+      - name: REGION
+        value: "$(params.region)"
+      - name: WORKSPACE
+        value: "$(workspaces.output.path)"
+      - name: PUBLIC_KEY_SECRET_NAME
+        value: aws-ssh-secret # This is just the public component.
+      script: |
+        #!/usr/bin/env bash
+
+        cd /tmp
+
+        # This configmap needs to be Git'opsed
+        # TODO: Put an immutable field in the configmap as well to ensure it remains static throughout its lifetime.
+        # See here: https://www.cloudytuts.com/tutorials/kubernetes/how-to-create-immutable-configmaps-and-secrets/
+        oc get configmap $CONFIGMAP -n $RESOURCE_NAMESPACE -o yaml > /tmp/rhacm-aws-cluster-crud-cmap.yaml
+
+    
+        # Parameters passed to the Tekton Job via user input in Backstage 
+        yq e -i '.metadata.name = env(CLUSTER_NAME)' /tmp/install-config-template.yaml
+        yq e -i '.platform.aws.region = env(REGION)' /tmp/install-config-template.yaml
+
+        # Base Domain
+        domain=`yq '.data.baseDomain' rhacm-aws-cluster-crud-cmap.yaml` yq e -i '.baseDomain = env(domain)' /tmp/install-config-template.yaml
+
+        ## ControlPlane 
+        replicas=`yq '.data.controlPlane' rhacm-aws-cluster-crud-cmap.yaml | grep replicas |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.controlPlane.replicas = env(replicas)' /tmp/install-config-template.yaml
+        arch=`yq '.data.controlPlane' rhacm-aws-cluster-crud-cmap.yaml | grep architecture |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.controlPlane.architecture = env(arch)' /tmp/install-config-template.yaml
+        type=`yq '.data.controlPlane' rhacm-aws-cluster-crud-cmap.yaml | grep aws.type |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.controlPlane.platform.aws.type = env(type)' /tmp/install-config-template.yaml
+        iops=`yq '.data.controlPlane' rhacm-aws-cluster-crud-cmap.yaml | grep iops |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.controlPlane.platform.aws.rootVolume.iops = env(iops)' /tmp/install-config-template.yaml
+        size=`yq '.data.controlPlane' rhacm-aws-cluster-crud-cmap.yaml | grep size |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.controlPlane.platform.aws.rootVolume.size = env(size)' /tmp/install-config-template.yaml
+        platformType=`yq '.data.controlPlane' rhacm-aws-cluster-crud-cmap.yaml | grep rootVolume.type |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.controlPlane.platform.aws.rootVolume.type = env(platformType)' /tmp/install-config-template.yaml
+
+        ## Compute
+        ## Be wary the compute stanza takes in a list, hence the [0]. That said, a replica field can be specified on a per element basis. So it may suffice to just use [0]
+        replicas=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep replicas |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.compute[0].replicas = env(replicas)' /tmp/install-config-template.yaml
+        arch=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep architecture |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.compute[0].architecture = env(arch)' /tmp/install-config-template.yaml
+        type=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep aws.type |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.compute[0].platform.aws.type = env(type)' /tmp/install-config-template.yaml
+        iops=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep iops |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.compute[0].platform.aws.rootVolume.iops = env(iops)' /tmp/install-config-template.yaml
+        size=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep size |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.compute[0].platform.aws.rootVolume.size = env(size)' /tmp/install-config-template.yaml
+        platformType=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep rootVolume.type |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.compute[0].platform.aws.rootVolume.type = env(platformType)' /tmp/install-config-template.yaml
+
+
+        # We need the public component of the SSH key - This should already be a created secret
+        pubKey=`oc get secret $PUBLIC_KEY_SECRET_NAME -n $RESOURCE_NAMESPACE -o yaml | yq '.data.ssh-publickey' | base64 -d` yq e -i '.sshKey = env(pubKey)' /tmp/install-config-template.yaml
+
+        # Encoded File. Note how the "" were placed around install-config.yaml. This is because the actual field name contains a "." which is rather intuitive. The dot in this case does NOT represent a nested field.
+        encoded=`cat install-config-template.yaml | base64 -w 0` yq e -i '.data."install-config.yaml" = env(encoded)' /tmp/install-config.yaml 
+        yq e -i '.metadata.namespace = env(CLUSTER_NAME)' /tmp/install-config.yaml
+        secretName="$CLUSTER_NAME-install-config" yq e -i '.metadata.name = env(secretName)' /tmp/install-config.yaml
+
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "455"' /tmp/install-config.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "455"' /tmp/install-config.yaml   
+
+        # This can be defined as an env variable in the Tekton task referencing the input workspace.
+        cp /tmp/install-config.yaml $WORKSPACE
+        cp rhacm-aws-cluster-crud-cmap.yaml $WORKSPACE
+        
+        baseDomain=$(yq '.data.baseDomain' rhacm-aws-cluster-crud-cmap.yaml)
+        installConfigRef="$CLUSTER_NAME-install-config"
+
+        echo $baseDomain | tee /tekton/results/baseDomain
+        echo $installConfigRef | tee /tekton/results/installConfigRef
+    - name: generate-cluster-deployment
+      image: quay.io/marwan_attar_ibm/rhacm-install-cluster-deployment-generator
+      env:
+      - name: CLUSTER_NAME
+        value: "$(params.clusterName)"
+      - name: CLOUD
+        value: "$(params.cloud)"
+      - name: REGION
+        value: "$(params.region)"
+      - name: WORKSPACE
+        value: "$(workspaces.output.path)"
+      - name: VERSION
+        value: "$(params.version)"
+      - name: PLATFORM_SECRET_SUFFIX # If you decide to change the value associated with this field here, ensure the corresponding changes are done in the "secret-generator" step.
+        value: aws-creds
+      - name: SSH_SECRET_SUFFIX # If you decide to change the value associated with this field here, ensure the corresponding changes are done in the "secret-generator" step.
+        value: ssh-private-key
+      - name: PULL_SECRET_SUFFIX # If you decide to change the value associated with this field here, ensure the corresponding changes are done in the "secret-generator" step.
+        value: pull-secret
+      script: |
+        #!/usr/bin/env bash
+
+        ## TODO: We are depending on global uniqueness given through the cluster name parameter. Enforce check here
+
+        cd /tmp
+
+        cp /workspace/output/rhacm-aws-cluster-crud-cmap.yaml /tmp
+
+        # Parameters passed to the Tekton Job via user input in Backstage 
+        yq e -i '.metadata.name = env(CLUSTER_NAME)' /tmp/cluster-deployment.yaml
+        yq e -i '.metadata.namespace = env(CLUSTER_NAME)' /tmp/cluster-deployment.yaml
+        yq e -i '.metadata.labels.cloud = env(CLOUD)' /tmp/cluster-deployment.yaml
+        yq e -i '.metadata.labels.region = env(REGION)' /tmp/cluster-deployment.yaml
+        yq e -i '.spec.clusterName = env(CLUSTER_NAME)' /tmp/cluster-deployment.yaml
+        yq e -i '.spec.platform.aws.region = env(REGION)' /tmp/cluster-deployment.yaml
+
+        # Obtain parameters from the upstream job
+        baseDomain=$(cat /tekton/results/baseDomain | tr -d ' ') yq e -i '.spec.baseDomain = env(baseDomain)' /tmp/cluster-deployment.yaml
+        installConfigRef=$(cat /tekton/results/installConfigRef | tr -d ' ') yq e -i '.spec.provisioning.installConfigSecretRef.name = env(installConfigRef)' /tmp/cluster-deployment.yaml
+
+        # Obtain parameter from ConfigMap - OpenShift Version is provided via a User input
+        version=`yq '.data.versions' rhacm-aws-cluster-crud-cmap.yaml | grep "$OS_VERSION" |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.provisioning.imageSetRef.name = env(version)' /tmp/cluster-deployment.yaml
+
+        # TODO: The remaining parameters. These are the references to the SSH, RH Pull and AWS Creds Secrets.
+        platformSecretName=$CLUSTER_NAME-$PLATFORM_SECRET_SUFFIX yq e -i '.spec.platform.aws.credentialsSecretRef.name = env(platformSecretName)' /tmp/cluster-deployment.yaml
+        sshSecretName=$CLUSTER_NAME-$SSH_SECRET_SUFFIX yq e -i '.spec.provisioning.sshPrivateKeySecretRef.name = env(sshSecretName)' /tmp/cluster-deployment.yaml
+        pullSecretName=$CLUSTER_NAME-$PULL_SECRET_SUFFIX yq e -i '.spec.pullSecretRef.name = env(pullSecretName)' /tmp/cluster-deployment.yaml
+
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "460"' /tmp/cluster-deployment.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "460"' /tmp/cluster-deployment.yaml  
+
+        # TODO: ArgoCD Sync Wave Annotations!!!! This will not be defined at an ArgoApp level
+        cp /tmp/cluster-deployment.yaml $WORKSPACE
+    - name: klusterletaddon-generation
+      image: quay.io/marwan_attar_ibm/rhacm-install-klusteraddonconfig-generator
+      env:
+      - name: CLUSTER_NAME
+        value: "$(params.clusterName)"
+      - name: WORKSPACE
+        value: "$(workspaces.output.path)"
+      script:  |
+        cd /tmp
+
+        cp /workspace/output/rhacm-aws-cluster-crud-cmap.yaml /tmp
+
+        # Parameters passed to the Tekton Job via user input in Backstage 
+        yq e -i '.metadata.name = env(CLUSTER_NAME)' /tmp/klusteraddonconfig.yaml
+        yq e -i '.metadata.namespace = env(CLUSTER_NAME)' /tmp/klusteraddonconfig.yaml
+        yq e -i '.spec.clusterNamespace = env(CLUSTER_NAME)' /tmp/klusteraddonconfig.yaml
+        yq e -i '.spec.clusterName = env(CLUSTER_NAME)' /tmp/klusteraddonconfig.yaml
+
+        # ConfigMap Params
+        cloud=`yq '.data.klusterlet' rhacm-aws-cluster-crud-cmap.yaml | grep cloud |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.clusterLabels.cloud = env(cloud)' /tmp/klusteraddonconfig.yaml
+        applicationManager=`yq '.data.klusterlet' rhacm-aws-cluster-crud-cmap.yaml | grep applicationManager |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.applicationManager.enabled = env(applicationManager)' /tmp/klusteraddonconfig.yaml
+        policyController=`yq '.data.klusterlet' rhacm-aws-cluster-crud-cmap.yaml | grep policyController |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.policyController.enabled = env(policyController)' /tmp/klusteraddonconfig.yaml
+        searchCollector=`yq '.data.klusterlet' rhacm-aws-cluster-crud-cmap.yaml | grep searchCollector |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.searchCollector.enabled = env(searchCollector)' /tmp/klusteraddonconfig.yaml
+        iamPolicyController=`yq '.data.klusterlet' rhacm-aws-cluster-crud-cmap.yaml | grep iamPolicyController |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.iamPolicyController.enabled = env(iamPolicyController)' /tmp/klusteraddonconfig.yaml
+        certPolicyController=`yq '.data.klusterlet' rhacm-aws-cluster-crud-cmap.yaml | grep certPolicyController |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.certPolicyController.enabled = env(certPolicyController)' /tmp/klusteraddonconfig.yaml
+
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "460"' /tmp/klusteraddonconfig.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "460"' /tmp/klusteraddonconfig.yaml 
+        
+        cp /tmp/klusteraddonconfig.yaml $WORKSPACE
+
+        # We need to be adding the sync waves as annotations
+    - name: machinepool-generation
+      image: quay.io/marwan_attar_ibm/rhacm-install-machinepool-generator
+      env:
+      - name: CLUSTER_NAME
+        value: "$(params.clusterName)"
+      - name: WORKSPACE
+        value: "$(workspaces.output.path)"
+      - name: REGION
+        value: "$(params.region)"
+      script:  |
+        cd /tmp
+
+        cp /workspace/output/rhacm-aws-cluster-crud-cmap.yaml /tmp
+
+        # Parameters passed to the Tekton Job via user input in Backstage 
+        machinePoolName="$CLUSTER_NAME-worker" yq e -i '.metadata.name = env(machinePoolName)' /tmp/machinepool.yaml
+        yq e -i '.metadata.namespace = env(CLUSTER_NAME)' /tmp/machinepool.yaml
+        yq e -i '.spec.clusterDeploymentRef.name = env(CLUSTER_NAME)' /tmp/machinepool.yaml
+        machinePoolName="$CLUSTER_NAME-worker" yq e -i '.spec.name = env(machinePoolName)' /tmp/machinepool.yaml
+        # yq e -i '.spec.platform.aws.region = env(REGION)' /tmp/machinepool.yaml
+
+
+        # Obtain parameter from ConfigMap
+        type=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep aws.type |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.platform.aws.type = env(type)' /tmp/machinepool.yaml
+        iops=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep iops |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.platform.aws.rootVolume.iops = env(iops)' /tmp/machinepool.yaml
+        size=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep size |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.platform.aws.rootVolume.size = env(size)' /tmp/machinepool.yaml
+        platformType=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep rootVolume.type |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.platform.aws.rootVolume.type = env(platformType)' /tmp/machinepool.yaml
+        replicas=`yq '.data.compute' rhacm-aws-cluster-crud-cmap.yaml | grep replicas |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.spec.replicas = env(replicas)' /tmp/machinepool.yaml
+
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "460"' /tmp/machinepool.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "460"' /tmp/machinepool.yaml
+
+        # We need to be adding the sync waves as annotations
+        # Encountered some issues with this bad boy so will leave as is for now.
+        # cp /tmp/machinepool.yaml $WORKSPACE
+    - name: managedcluster-generation
+      image: quay.io/marwan_attar_ibm/rhacm-install-managedcluster-generator
+      env:
+      - name: CLUSTER_NAME
+        value: "$(params.clusterName)"
+      - name: WORKSPACE
+        value: "$(workspaces.output.path)"
+      - name: REGION
+        value: "$(params.region)"
+      script:  |
+        cd /tmp
+
+        cp /workspace/output/rhacm-aws-cluster-crud-cmap.yaml /tmp
+
+        yq e -i '.metadata.name = env(CLUSTER_NAME)' /tmp/managedclusterinfo.yaml
+        yq e -i '.metadata.namespace = env(CLUSTER_NAME)' /tmp/managedclusterinfo.yaml
+
+        # Parameters passed to the Tekton Job via user input in Backstage 
+        yq e -i '.metadata.name = env(CLUSTER_NAME)' /tmp/managedcluster.yaml
+        yq e -i '.metadata.labels.name = env(CLUSTER_NAME)' /tmp/managedcluster.yaml
+        yq e -i '.metadata.labels.region = env(REGION)' /tmp/managedcluster.yaml
+
+        # ConfigMap Params
+        cloud=`yq '.data.managedCluster' rhacm-aws-cluster-crud-cmap.yaml| grep cloud |  cut -d "=" -f2 | awk '{print $1}'` yq e -i '.metadata.labels.cloud = env(cloud)' /tmp/managedcluster.yaml
+
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "470"' /tmp/managedcluster.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "470"' /tmp/managedcluster.yaml
+        yq e -i '.metadata.annotations."argocd.argoproj.io/sync-wave" = "470"' /tmp/managedclusterinfo.yaml
+        yq e -i '.metadata.annotations."helm.sh/hook-weight" = "470"' /tmp/managedclusterinfo.yaml
+
+        cp /tmp/managedcluster.yaml $WORKSPACE
+        cp /tmp/managedclusterinfo.yaml $WORKSPACE
+
+        # Remove the configmap from the workspace. Not needed anymore. Perhaps better to parametrise this.
+        rm $WORKSPACE/rhacm-aws-cluster-crud-cmap.yaml
+
+        # We need to be adding the sync waves as annotations
+    - name: print-out
+      image: quay.io/marwan_attar_ibm/rhacm-install-cluster-deployment-generator
+      script: |
+        #!/usr/bin/env bash
+        ls -ltr /workspace/output
+        find /workspace/output -type f -exec cat {} \;
